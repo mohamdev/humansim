@@ -3,7 +3,9 @@
 Script to display the ANNY parametric human model in neutral pose using MuJoCo viewer.
 
 ANNY is a free and interpretable human body model for all ages, written in PyTorch.
-This script displays the model in its neutral/rest pose with coordinate frames.
+This script displays the model in its neutral/rest pose with:
+- Transparent mesh visualization
+- 3D coordinate frames at each bone location
 """
 
 import torch
@@ -25,6 +27,8 @@ def create_anny_mesh_in_neutral_pose(anny_model):
     Returns:
         vertices: numpy array of shape (n_vertices, 3)
         faces: numpy array of shape (n_faces, 3 or 4)
+        bone_poses: numpy array of shape (n_bones, 4, 4)
+        bone_labels: list of bone names
     """
     print("Generating ANNY mesh in neutral pose...")
 
@@ -43,21 +47,28 @@ def create_anny_mesh_in_neutral_pose(anny_model):
     vertices = output['vertices'].squeeze(0).cpu().numpy()
     faces = anny_model.faces.cpu().numpy()
 
+    # Extract bone poses (4x4 transformation matrices)
+    bone_poses = output['bone_poses'].squeeze(0).cpu().numpy()
+    bone_labels = anny_model.bone_labels
+
     print(f"Generated mesh: {vertices.shape[0]} vertices, {faces.shape[0]} faces")
+    print(f"Number of bones: {len(bone_labels)}")
     print(f"Vertex range: x=[{vertices[:, 0].min():.3f}, {vertices[:, 0].max():.3f}], "
           f"y=[{vertices[:, 1].min():.3f}, {vertices[:, 1].max():.3f}], "
           f"z=[{vertices[:, 2].min():.3f}, {vertices[:, 2].max():.3f}]")
 
-    return vertices, faces
+    return vertices, faces, bone_poses, bone_labels
 
 
-def create_mujoco_xml_with_mesh(vertices, faces):
+def create_mujoco_xml_with_mesh(vertices, faces, bone_poses, bone_labels):
     """
-    Create a MuJoCo XML model with the ANNY mesh.
+    Create a MuJoCo XML model with the ANNY mesh and bone frames.
 
     Args:
         vertices: numpy array of shape (n_vertices, 3)
         faces: numpy array of shape (n_faces, 3 or 4)
+        bone_poses: numpy array of shape (n_bones, 4, 4)
+        bone_labels: list of bone names
 
     Returns:
         xml_path: Path to the created XML file
@@ -93,6 +104,20 @@ def create_mujoco_xml_with_mesh(vertices, faces):
         # Fallback: write STL manually
         write_stl(mesh_path, vertices, faces_tri)
 
+    # Generate bone sites XML
+    # Each bone pose is a 4x4 transformation matrix
+    # The position is in the last column (translation part)
+    bone_sites_xml = ""
+    for i, (label, pose) in enumerate(zip(bone_labels, bone_poses)):
+        # Extract position from the transformation matrix (last column, first 3 rows)
+        pos = pose[:3, 3]
+        # Create a site for each bone to visualize its frame
+        # Clean the label to make it XML-safe
+        safe_label = label.replace('.', '_').replace(' ', '_')
+        bone_sites_xml += f'                <site name="bone_{safe_label}" pos="{pos[0]:.6f} {pos[1]:.6f} {pos[2]:.6f}" size="0.01"/>\n'
+
+    print(f"Generated {len(bone_labels)} bone sites for frame visualization")
+
     # Create MuJoCo XML
     xml_content = f"""
     <mujoco model="anny_neutral">
@@ -113,7 +138,7 @@ def create_mujoco_xml_with_mesh(vertices, faces):
             <mesh name="anny_mesh" file="anny_mesh.stl" scale="1 1 1"/>
             <texture name="texplane" type="2d" builtin="checker" rgb1=".2 .3 .4" rgb2=".3 .4 .5" width="512" height="512"/>
             <material name="matplane" reflectance="0.3" texture="texplane" texrepeat="1 1" texuniform="true"/>
-            <material name="anny_material" rgba="0.6 0.8 0.7 1.0"/>
+            <material name="anny_material" rgba="0.6 0.8 0.7 0.3"/>
         </asset>
 
         <worldbody>
@@ -125,7 +150,7 @@ def create_mujoco_xml_with_mesh(vertices, faces):
             <body name="anny_body" pos="0 0 1">
                 <freejoint/>
                 <geom name="anny_geom" type="mesh" mesh="anny_mesh" material="anny_material"/>
-                <site name="root" pos="0 0 0" size="0.01"/>
+                {bone_sites_xml}
             </body>
         </worldbody>
     </mujoco>
@@ -190,10 +215,10 @@ def main():
     print(f"Bone labels: {len(anny_model.bone_labels)}")
 
     # Generate mesh in neutral pose
-    vertices, faces = create_anny_mesh_in_neutral_pose(anny_model)
+    vertices, faces, bone_poses, bone_labels = create_anny_mesh_in_neutral_pose(anny_model)
 
     # Create MuJoCo model with the mesh
-    xml_path, temp_dir = create_mujoco_xml_with_mesh(vertices, faces)
+    xml_path, temp_dir = create_mujoco_xml_with_mesh(vertices, faces, bone_poses, bone_labels)
 
     # Load the MuJoCo model
     print("\nLoading MuJoCo model...")
@@ -220,14 +245,20 @@ def main():
     print("Close the viewer window to exit.")
 
     with mujoco.viewer.launch_passive(model, data) as viewer:
-        # Enable frame visualization
-        viewer.opt.frame = mujoco.mjtFrame.mjFRAME_BODY
+        # Enable frame visualization for sites (bones)
+        viewer.opt.frame = mujoco.mjtFrame.mjFRAME_SITE
+
+        # Make frames smaller for better visibility
+        model.vis.scale.framewidth *= 0.5
+        model.vis.scale.framelength *= (0.5 / 3)  # 3 times smaller than before
 
         # Set camera for better view
         viewer.cam.azimuth = 90
         viewer.cam.elevation = -10
         viewer.cam.distance = 3.0
         viewer.cam.lookat[:] = [0, 0, 1]
+
+        print("\nBone frames enabled! You should see coordinate frames at each bone location.")
 
         # Main loop - just keep the viewer open
         while viewer.is_running():
