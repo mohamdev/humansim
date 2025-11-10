@@ -104,6 +104,10 @@ def main():
                 # Enable coordinate frames for all body segments
                 env._viewer._scene_option.frame = mujoco.mjtFrame.mjFRAME_BODY
 
+                # Make frames twice smaller (default is 0.01 for width, 1.0 for length)
+                env._model.vis.scale.framewidth *= 0.5
+                env._model.vis.scale.framelength *= 0.5
+
                 frames_enabled = True
                 print("\n3D coordinate frames enabled!")
                 print("Playing trajectory animation...")
