@@ -79,9 +79,10 @@ def compute_se3_alignments(env_skel, anny_bone_poses: Dict, name_map: List[Tuple
 # ============================================================================
 # Visualization
 # ============================================================================
-def create_combined_scene(env_skel, anny_model, temp_dir):
+def create_combined_scene(env_skel, anny_model, temp_dir, alignments):
     """Create combined MuJoCo XML with skeleton + ANNY mesh overlaid."""
     import trimesh, xml.etree.ElementTree as ET
+    from scipy.spatial.transform import Rotation as Rot
     # Generate ANNY mesh
     pose_params = {label: torch.eye(4, dtype=torch.float32)[None] for label in anny_model.bone_labels}
     output = anny_model(pose_parameters=pose_params)
@@ -135,12 +136,33 @@ def create_combined_scene(env_skel, anny_model, temp_dir):
             <geom name="anny_geom" type="mesh" mesh="anny_mesh" rgba="0.6 0.8 0.7 0.15"/>
         </body>
 '''
-    # Add skeleton body, removing mimic class and freejoint references
+    # Add skeleton body with root alignment applied
     import re
+    # Get root (pelvis) alignment to position skeleton
+    root_align = alignments.get('pelvis', None)
+    if root_align:
+        R_root = np.array(root_align['rotation'])
+        t_root = np.array(root_align['translation'])
+        # Convert rotation to quaternion (w,x,y,z)
+        q = Rot.from_matrix(R_root).as_quat()  # [x,y,z,w]
+        quat_wxyz = [q[3], q[0], q[1], q[2]]
+        pos_str = f"{t_root[0]:.6f} {t_root[1]:.6f} {t_root[2]:.6f}"
+        quat_str = f"{quat_wxyz[0]:.6f} {quat_wxyz[1]:.6f} {quat_wxyz[2]:.6f} {quat_wxyz[3]:.6f}"
+        # Debug: print alignment being applied
+        import sys
+        if not hasattr(sys, '_alignment_printed'):
+            print(f"   Root alignment: pos=[{t_root[0]:.3f}, {t_root[1]:.3f}, {t_root[2]:.3f}]")
+            sys._alignment_printed = True
+        # Create wrapper body with alignment transformation
+        xml += f'        <body name="skel_aligned" pos="{pos_str}" quat="{quat_str}">\n'
+    else:
+        xml += '        <body name="skel_aligned" pos="0 0 0">\n'
+
     body_str = ET.tostring(skel_body, encoding='unicode')
     body_str = body_str.replace(' class="mimic"', '')
     body_str = re.sub(r'<freejoint[^/]*/>', '', body_str)
-    xml += "        " + body_str + "\n"
+    xml += "            " + body_str + "\n"
+    xml += "        </body>\n"
     xml += '''    </worldbody>
 </mujoco>'''
     xml_path = os.path.join(temp_dir, "combined.xml")
@@ -171,16 +193,19 @@ def visualize_alignment(env_skel, anny_model, bone_poses, alignments, name_map):
     print(f"   RMS translation error: {rms_trans:.2f} cm")
     # Visualize
     print("   Creating combined visualization...")
+    print("   Applying root alignment to position skeleton over ANNY...")
     temp_dir = tempfile.mkdtemp()
     try:
-        xml_path = create_combined_scene(env_skel, anny_model, temp_dir)
+        xml_path = create_combined_scene(env_skel, anny_model, temp_dir, alignments)
         model = mujoco.MjModel.from_xml_path(xml_path)
         data = mujoco.MjData(model)
         mujoco.mj_resetData(model, data)
         print("\n" + "="*80)
         print("Viewer Controls: E=frames | T=transparent | H=menu | ESC=exit")
         print("="*80)
-        print("Showing: Skeleton (opaque) + ANNY (transparent, overlaid)\n")
+        print("Showing: Skeleton (opaque) + ANNY (transparent)")
+        print("         Skeleton has been aligned to overlay ANNY using root transformation")
+        print("         Both models should be overlapping at the same position\n")
         with mujoco.viewer.launch_passive(model, data) as viewer:
             viewer.opt.frame = mujoco.mjtFrame.mjFRAME_BODY
             viewer.cam.distance = 3.0
